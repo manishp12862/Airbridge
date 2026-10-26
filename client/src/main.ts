@@ -100,7 +100,7 @@ declare const Peer: any;
 // -------------------------------------------------------------
 // CONSTANTS & CONFIGURATION
 // -------------------------------------------------------------
-const CHUNK_SIZE = 64 * 1024; // 64 KB chunks: optimal for iOS Safari & Android
+// const CHUNK_SIZE = 64 * 1024;
 const PEER_PREFIX = 'airbridge-v1-';
 
 // -------------------------------------------------------------
@@ -286,6 +286,14 @@ async function sendFile(file: File) {
     return;
   }
 
+  // Use the underlying RTCDataChannel directly
+  const dc: RTCDataChannel = activeConnection.dataChannel;
+  if (!dc) {
+    alert('Data channel not ready');
+    return;
+  }
+
+  // 1. Send metadata header
   activeConnection.send({
     type: 'header',
     name: file.name,
@@ -295,41 +303,49 @@ async function sendFile(file: File) {
 
   showProgressCard(file.name, file.size, false);
 
-  const dc: RTCDataChannel | undefined = activeConnection.dataChannel;
-  if (dc) {
-    dc.bufferedAmountLowThreshold = 256 * 1024; // 256 KB
-  }
-
+  const CHUNK_16K = 16 * 1024; // 16 KB chunks to prevent WebRTC backpressure stalls
   let offset = 0;
   const startTime = Date.now();
 
+  // Set threshold
+  dc.bufferedAmountLowThreshold = 64 * 1024;
+
   while (offset < file.size) {
-    if (dc && dc.bufferedAmount > 512 * 1024) {
+    // If buffer is building up, pause until it drains
+    if (dc.bufferedAmount > 256 * 1024) {
       await new Promise<void>((resolve) => {
-        const onLow = () => {
-          dc.removeEventListener('bufferedamountlow', onLow);
+        const handler = () => {
+          dc.removeEventListener('bufferedamountlow', handler);
           resolve();
         };
-        dc.addEventListener('bufferedamountlow', onLow);
-        // Safety timeout so it never hangs
+        dc.addEventListener('bufferedamountlow', handler);
         setTimeout(() => {
-          dc.removeEventListener('bufferedamountlow', onLow);
+          dc.removeEventListener('bufferedamountlow', handler);
           resolve();
-        }, 50);
+        }, 30);
       });
     }
 
-    const chunkSlice = file.slice(offset, offset + CHUNK_SIZE);
-    const buffer = await chunkSlice.arrayBuffer();
+    const chunk = file.slice(offset, offset + CHUNK_16K);
+    const buffer = await chunk.arrayBuffer();
 
-    activeConnection.send(buffer);
+    try {
+      dc.send(buffer);
+    } catch (err) {
+      console.warn('dc.send paused, retrying in 50ms...', err);
+      await new Promise<void>((r) => setTimeout(r, 50));
+      continue;
+    }
 
     offset += buffer.byteLength;
     updateProgress(offset, file.size, startTime);
   }
 
-  activeConnection.send({ type: 'done' });
-  addHistoryItem(file.name, file.size, 'sent');
+  // Signal completion
+  setTimeout(() => {
+    activeConnection.send({ type: 'done' });
+    addHistoryItem(file.name, file.size, 'sent');
+  }, 100);
 }
 
 // -------------------------------------------------------------
