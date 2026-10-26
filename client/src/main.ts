@@ -1,30 +1,21 @@
 import QRCode from 'qrcode';
 
+declare const Peer: any;
+
 // -------------------------------------------------------------
 // CONSTANTS & CONFIGURATION
 // -------------------------------------------------------------
-const CHUNK_SIZE = 64 * 1024; // 64 KB chunks: optimal for iOS Safari & Android WebRTC
-const BUFFER_THRESHOLD = 1024 * 1024; // 1 MB backpressure threshold to avoid crashing RAM
-
-// Free public STUN servers for direct NAT traversal
-const RTC_CONFIG: RTCConfiguration = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' }
-  ]
-};
+const CHUNK_SIZE = 64 * 1024; // 64 KB chunks: optimal for iOS Safari & Android
+const PEER_PREFIX = 'airbridge-v1-';
 
 // -------------------------------------------------------------
 // STATE
 // -------------------------------------------------------------
-let roomId = generateRandomPin();
-let peerConnection: RTCPeerConnection | null = null;
-let dataChannel: RTCDataChannel | null = null;
-let ws: WebSocket | null = null;
+let myPin = generateRandomPin();
+let peer: any = null;
+let activeConnection: any = null;
 let wakeLock: any = null;
 
-// File Receiving Buffer State
 interface IncomingFile {
   name: string;
   size: number;
@@ -61,30 +52,22 @@ const transferDoneBox = document.getElementById('transferDoneBox')!;
 const downloadBtn = document.getElementById('downloadBtn') as HTMLAnchorElement;
 const fileList = document.getElementById('fileList')!;
 const wakeLockBadge = document.getElementById('wakeLockBadge')!;
+const peerDeviceName = document.getElementById('peerDeviceName')!;
 
 // -------------------------------------------------------------
 // INITIALIZATION
 // -------------------------------------------------------------
 function init() {
-  // Check URL parameters for room code (?room=1234)
   const urlParams = new URLSearchParams(window.location.search);
   const roomParam = urlParams.get('room');
   if (roomParam && roomParam.length === 4) {
-    roomId = roomParam;
     joinInput.value = roomParam;
   }
 
-  // Display Room PIN & Generate QR Code
-  myPinEl.textContent = roomId;
+  myPinEl.textContent = myPin;
   generateQRCode();
-
-  // Setup Event Listeners
   setupEventListeners();
-
-  // Connect to Signaling Server
-  connectSignalingServer();
-
-  // Request Screen Wake Lock (keeps iOS Safari awake during multi-gigabyte transfers)
+  initPeer();
   requestWakeLock();
 }
 
@@ -93,7 +76,7 @@ function generateRandomPin(): string {
 }
 
 function generateQRCode() {
-  const shareUrl = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
+  const shareUrl = `${window.location.origin}${window.location.pathname}?room=${myPin}`;
   QRCode.toCanvas(qrCanvas, shareUrl, {
     width: 154,
     margin: 0,
@@ -105,7 +88,7 @@ function generateQRCode() {
 }
 
 // -------------------------------------------------------------
-// SCREEN WAKE LOCK (Crucial for iOS & Android)
+// SCREEN WAKE LOCK (Prevents iOS & Android sleep during transfers)
 // -------------------------------------------------------------
 async function requestWakeLock() {
   try {
@@ -122,219 +105,138 @@ async function requestWakeLock() {
 }
 
 // -------------------------------------------------------------
-// SIGNALING & WEBRTC
+// PEERJS CLOUD CONNECTION (Free & Serverless)
 // -------------------------------------------------------------
-function connectSignalingServer() {
-  // Try local server first; fallback gracefully
-  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsHost = window.location.hostname === 'localhost' 
-    ? `localhost:9000` 
-    : window.location.host;
-
+function initPeer() {
   connectionStatus.textContent = 'Connecting to signaling network...';
 
-  try {
-    ws = new WebSocket(`${wsProtocol}//${wsHost}`);
-
-    ws.onopen = () => {
-      connectionStatus.textContent = `Joined room ${roomId}. Waiting for device...`;
-      ws?.send(JSON.stringify({ type: 'join', roomId }));
-    };
-
-    ws.onmessage = async (event) => {
-      const data = JSON.parse(event.data);
-
-      switch (data.type) {
-        case 'joined':
-          console.log('[AirBridge] Joined as initiator:', data.isInitiator);
-          break;
-
-        case 'peer_joined':
-          connectionStatus.textContent = 'Peer detected! Establishing P2P link...';
-          initiatePeerConnection();
-          break;
-
-        case 'signal':
-          handleSignal(data.payload);
-          break;
-
-        case 'peer_disconnected':
-          resetToPairingView('Remote peer disconnected.');
-          break;
-
-        case 'error':
-          connectionStatus.textContent = data.message;
-          break;
-      }
-    };
-
-    ws.onerror = () => {
-      connectionStatus.innerHTML = `⚠️ Signaling offline. (Run <code>npm run dev:server</code> or use LAN).`;
-    };
-
-    ws.onclose = () => {
-      console.log('Signaling connection closed');
-    };
-  } catch (err) {
-    console.error('Signaling connection failed', err);
-  }
-}
-
-function initiatePeerConnection() {
-  peerConnection = new RTCPeerConnection(RTC_CONFIG);
-
-  // Setup ICE Candidates
-  peerConnection.onicecandidate = (e) => {
-    if (e.candidate) {
-      ws?.send(JSON.stringify({
-        type: 'signal',
-        roomId,
-        payload: { candidate: e.candidate }
-      }));
+  const fullId = `${PEER_PREFIX}${myPin}`;
+  peer = new Peer(fullId, {
+    debug: 1,
+    config: {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+      ]
     }
-  };
-
-  // Create DataChannel (Initiator)
-  dataChannel = peerConnection.createDataChannel('fileTransfer', {
-    ordered: true
   });
-  setupDataChannel(dataChannel);
 
-  // Create & Send Offer
-  peerConnection.createOffer().then((offer) => {
-    peerConnection?.setLocalDescription(offer);
-    ws?.send(JSON.stringify({
-      type: 'signal',
-      roomId,
-      payload: { sdp: offer }
-    }));
+  peer.on('open', () => {
+    connectionStatus.textContent = `Online! Waiting for device to scan or enter PIN: ${myPin}`;
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const roomParam = urlParams.get('room');
+    if (roomParam && roomParam !== myPin) {
+      connectToPeer(roomParam);
+    }
+  });
+
+  peer.on('connection', (conn: any) => {
+    handleConnection(conn);
+  });
+
+  peer.on('error', (err: any) => {
+    console.error('Peer error:', err);
+    if (err.type === 'unavailable-id') {
+      myPin = generateRandomPin();
+      myPinEl.textContent = myPin;
+      generateQRCode();
+      initPeer();
+    } else if (err.type === 'peer-unavailable') {
+      connectionStatus.textContent = '❌ PIN not found or device is offline. Check the number!';
+    } else {
+      connectionStatus.textContent = `Connection error: ${err.type}`;
+    }
   });
 }
 
-async function handleSignal(payload: any) {
-  if (payload.sdp) {
-    if (!peerConnection) {
-      peerConnection = new RTCPeerConnection(RTC_CONFIG);
-
-      peerConnection.onicecandidate = (e) => {
-        if (e.candidate) {
-          ws?.send(JSON.stringify({
-            type: 'signal',
-            roomId,
-            payload: { candidate: e.candidate }
-          }));
-        }
-      };
-
-      peerConnection.ondatachannel = (e) => {
-        dataChannel = e.channel;
-        setupDataChannel(dataChannel);
-      };
-    }
-
-    await peerConnection.setRemoteDescription(new RTCSessionDescription(payload.sdp));
-
-    if (payload.sdp.type === 'offer') {
-      const answer = await peerConnection.createAnswer();
-      await peerConnection.setLocalDescription(answer);
-      ws?.send(JSON.stringify({
-        type: 'signal',
-        roomId,
-        payload: { sdp: answer }
-      }));
-    }
-  } else if (payload.candidate && peerConnection) {
-    await peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate));
-  }
+function connectToPeer(targetPin: string) {
+  connectionStatus.textContent = `Connecting to device ${targetPin}...`;
+  const targetId = `${PEER_PREFIX}${targetPin}`;
+  const conn = peer.connect(targetId, {
+    reliable: true
+  });
+  handleConnection(conn);
 }
 
-function setupDataChannel(channel: RTCDataChannel) {
-  channel.binaryType = 'arraybuffer';
+function handleConnection(conn: any) {
+  activeConnection = conn;
 
-  channel.onopen = () => {
+  conn.on('open', () => {
+    peerDeviceName.textContent = `Paired Device (${conn.peer.replace(PEER_PREFIX, 'PIN ')})`;
     showTransferView();
-  };
+  });
 
-  channel.onclose = () => {
-    resetToPairingView('Connection closed.');
-  };
+  conn.on('data', (data: any) => {
+    handleIncomingData(data);
+  });
 
-  channel.onmessage = (event) => {
-    handleIncomingData(event.data);
-  };
+  conn.on('close', () => {
+    resetToPairingView('Connection closed by peer.');
+  });
+
+  conn.on('error', (err: any) => {
+    console.error('Connection error:', err);
+    resetToPairingView('Connection error occurred.');
+  });
 }
 
 // -------------------------------------------------------------
-// HIGH-VOLUME 5-10 GB CHUNKED FILE SENDER (STREAMING)
+// FILE SENDER (5 - 10 GB Low-Memory Streaming)
 // -------------------------------------------------------------
 async function sendFile(file: File) {
-  if (!dataChannel || dataChannel.readyState !== 'open') {
+  if (!activeConnection || !activeConnection.open) {
     alert('Please wait for device connection!');
     return;
   }
 
-  // 1. Send file metadata header
-  const header = {
+  activeConnection.send({
     type: 'header',
     name: file.name,
     size: file.size,
     mimeType: file.type || 'application/octet-stream'
-  };
-  dataChannel.send(JSON.stringify(header));
+  });
 
-  // 2. Prepare UI
   showProgressCard(file.name, file.size, false);
 
   let offset = 0;
   const startTime = Date.now();
 
-  // Stream slices directly into RTCDataChannel
   while (offset < file.size) {
-    // Backpressure control: wait if buffer exceeds 1 MB so browser doesn't crash RAM
-    if (dataChannel.bufferedAmount > BUFFER_THRESHOLD) {
-      await new Promise<void>((resolve) => {
-        const check = () => {
-          if (!dataChannel || dataChannel.bufferedAmount < BUFFER_THRESHOLD / 2) {
-            resolve();
-          } else {
-            setTimeout(check, 10);
-          }
-        };
-        check();
-      });
+    const dc = activeConnection.dataChannel;
+    if (dc && dc.bufferedAmount > 1024 * 1024) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
     }
 
     const chunkSlice = file.slice(offset, offset + CHUNK_SIZE);
     const buffer = await chunkSlice.arrayBuffer();
-    dataChannel.send(buffer);
+
+    activeConnection.send(buffer);
 
     offset += buffer.byteLength;
     updateProgress(offset, file.size, startTime);
   }
 
-  // 3. Send transfer end signal
-  dataChannel.send(JSON.stringify({ type: 'done' }));
+  activeConnection.send({ type: 'done' });
   addHistoryItem(file.name, file.size, 'sent');
 }
 
 // -------------------------------------------------------------
-// CHUNKED FILE RECEIVER
+// FILE RECEIVER
 // -------------------------------------------------------------
 function handleIncomingData(data: any) {
-  if (typeof data === 'string') {
-    const message = JSON.parse(data);
-
-    if (message.type === 'header') {
+  if (data && typeof data === 'object' && !(data instanceof ArrayBuffer)) {
+    if (data.type === 'header') {
       currentIncomingFile = {
-        name: message.name,
-        size: message.size,
-        type: message.mimeType,
+        name: data.name,
+        size: data.size,
+        type: data.mimeType,
         receivedBytes: 0,
         chunks: [],
         startTime: Date.now()
       };
-      showProgressCard(message.name, message.size, true);
-    } else if (message.type === 'done') {
+      showProgressCard(data.name, data.size, true);
+    } else if (data.type === 'done') {
       if (currentIncomingFile) {
         completeIncomingFile(currentIncomingFile);
         currentIncomingFile = null;
@@ -343,7 +245,6 @@ function handleIncomingData(data: any) {
     return;
   }
 
-  // Raw Binary Chunk
   if (currentIncomingFile && data instanceof ArrayBuffer) {
     currentIncomingFile.chunks.push(data);
     currentIncomingFile.receivedBytes += data.byteLength;
@@ -364,7 +265,6 @@ function completeIncomingFile(file: IncomingFile) {
   downloadBtn.href = objectUrl;
   downloadBtn.download = file.name;
 
-  // Auto trigger download for mobile Safari & Android Chrome
   downloadBtn.click();
 
   addHistoryItem(file.name, file.size, 'received', objectUrl);
@@ -440,22 +340,16 @@ function addHistoryItem(name: string, size: number, mode: 'sent' | 'received', d
 // EVENT LISTENERS
 // -------------------------------------------------------------
 function setupEventListeners() {
-  // Join Room via PIN input
   joinForm.addEventListener('submit', (e) => {
     e.preventDefault();
     const pin = joinInput.value.trim();
     if (pin.length === 4) {
-      roomId = pin;
-      myPinEl.textContent = roomId;
-      generateQRCode();
-      ws?.send(JSON.stringify({ type: 'join', roomId }));
-      connectionStatus.textContent = `Connecting to room ${roomId}...`;
+      connectToPeer(pin);
     }
   });
 
-  // Copy URL
   copyLinkBtn.addEventListener('click', async () => {
-    const shareUrl = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
+    const shareUrl = `${window.location.origin}${window.location.pathname}?room=${myPin}`;
     await navigator.clipboard.writeText(shareUrl);
     copyLinkBtn.textContent = 'Copied!';
     setTimeout(() => {
@@ -466,13 +360,11 @@ function setupEventListeners() {
     }, 2000);
   });
 
-  // Disconnect
   disconnectBtn.addEventListener('click', () => {
-    peerConnection?.close();
+    activeConnection?.close();
     resetToPairingView('Disconnected.');
   });
 
-  // File Dropzone
   dropZone.addEventListener('dragover', (e) => {
     e.preventDefault();
     dropZone.classList.add('dragover');
@@ -497,5 +389,4 @@ function setupEventListeners() {
   });
 }
 
-// Start
 init();
