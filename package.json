@@ -1,0 +1,16 @@
+{
+  "name": "airbridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "High-speed peer-to-peer 5-10GB file sharing between iOS and Android without server storage",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:client": "npm --prefix client run dev",
+    "dev:server": "npm --prefix server run dev",
+    "build": "npm --prefix client run build && npm --prefix server run build",
+    "install:all": "npm install && npm --prefix client install && npm --prefix server install"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

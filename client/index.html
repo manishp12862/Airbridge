@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#0f172a" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>AirBridge - Direct P2P File Sharing (iOS ⇄ Android)</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Header -->
+      <header class="app-header">
+        <div class="logo-container">
+          <div class="logo-glow"></div>
+          <div class="logo-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+            </svg>
+          </div>
+          <div>
+            <h1 class="logo-title">AirBridge</h1>
+            <p class="logo-subtitle">Zero-Storage P2P File Bridge</p>
+          </div>
+        </div>
+        <div class="header-badges">
+          <span class="badge badge-encrypted">
+            <span class="status-dot"></span> P2P Direct
+          </span>
+          <span id="wakeLockBadge" class="badge badge-wake hidden">
+            ⚡ Screen Awake
+          </span>
+        </div>
+      </header>
+
+      <!-- Main Container -->
+      <main class="main-content">
+        <!-- SCREEN 1: CONNECTION / PAIRING -->
+        <section id="pairingSection" class="glass-card">
+          <div class="card-header">
+            <h2>Connect Devices</h2>
+            <p>Scan the QR code or enter PIN on your other phone to link iOS & Android instantly.</p>
+          </div>
+
+          <div class="pairing-box">
+            <!-- QR Display -->
+            <div class="qr-wrapper">
+              <canvas id="qrCanvas"></canvas>
+              <div class="qr-center-icon">📲</div>
+            </div>
+
+            <!-- PIN Display & Input -->
+            <div class="pin-section">
+              <span class="pin-label">YOUR ROOM CODE</span>
+              <div class="pin-display" id="myPin">----</div>
+              <button id="copyLinkBtn" class="btn btn-secondary">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                Copy Link
+              </button>
+            </div>
+          </div>
+
+          <div class="divider">
+            <span>OR JOIN A CODE</span>
+          </div>
+
+          <!-- Join other device -->
+          <form id="joinForm" class="join-form">
+            <input 
+              type="text" 
+              id="joinInput" 
+              placeholder="Enter 4-digit PIN..." 
+              maxlength="4" 
+              inputmode="numeric" 
+              pattern="[0-9]*" 
+              autocomplete="off"
+            />
+            <button type="submit" id="joinBtn" class="btn btn-primary">Connect</button>
+          </form>
+
+          <div id="connectionStatus" class="connection-status">
+            Waiting for peer to scan or connect...
+          </div>
+        </section>
+
+        <!-- SCREEN 2: ACTIVE TRANSFER VIEW (Shown when paired) -->
+        <section id="transferSection" class="glass-card hidden">
+          <div class="paired-header">
+            <div class="peer-info">
+              <div class="peer-avatar">📱</div>
+              <div>
+                <span class="paired-tag">CONNECTED</span>
+                <h3 id="peerDeviceName">Remote Device</h3>
+              </div>
+            </div>
+            <button id="disconnectBtn" class="btn btn-sm btn-ghost">Disconnect</button>
+          </div>
+
+          <!-- Dropzone -->
+          <div id="dropZone" class="dropzone">
+            <input type="file" id="fileInput" class="file-input" multiple />
+            <div class="dropzone-content">
+              <div class="upload-icon-circle">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                  <polyline points="17 8 12 3 7 8"/>
+                  <line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
+              </div>
+              <h4>Choose files or drop them here</h4>
+              <p class="dropzone-hint">Supports Photos, Videos, 4K Footage, Archives up to <strong>10 GB</strong></p>
+              <button type="button" class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
+                Select Files
+              </button>
+            </div>
+          </div>
+
+          <!-- Active Transfer Item -->
+          <div id="transferProgressCard" class="transfer-card hidden">
+            <div class="transfer-info">
+              <div class="file-icon-box" id="fileTypeIcon">📁</div>
+              <div class="transfer-details">
+                <div class="transfer-title-row">
+                  <h4 id="currentFileName" class="truncate">large-video-file.mp4</h4>
+                  <span id="transferPercentage" class="percentage-badge">0%</span>
+                </div>
+                <div class="transfer-meta">
+                  <span id="transferBytes">0 MB / 0 MB</span>
+                  <span class="meta-dot">•</span>
+                  <span id="transferSpeed">0 MB/s</span>
+                  <span class="meta-dot">•</span>
+                  <span id="transferEta">ETA: --</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Progress Bar -->
+            <div class="progress-track">
+              <div id="progressBar" class="progress-bar-fill" style="width: 0%"></div>
+            </div>
+
+            <div id="transferDoneBox" class="transfer-done hidden">
+              <div class="done-alert">
+                <span>🎉 Transfer Complete!</span>
+                <a id="downloadBtn" class="btn btn-sm btn-success" download>Save File</a>
+              </div>
+            </div>
+          </div>
+
+          <!-- History / Queue -->
+          <div class="transfer-history">
+            <h4>Transferred Files</h4>
+            <div id="fileList" class="file-list">
+              <div class="empty-files">No files sent or received yet.</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Feature Callouts -->
+        <section class="features-grid">
+          <div class="feature-item">
+            <div class="feature-icon">🚀</div>
+            <div>
+              <h5>Gigabit Speeds</h5>
+              <p>Streams direct over Wi-Fi without server roundtrips.</p>
+            </div>
+          </div>
+          <div class="feature-item">
+            <div class="feature-icon">🛡️</div>
+            <div>
+              <h5>100% Private</h5>
+              <p>Files never touch a cloud or hard drive outside your phone.</p>
+            </div>
+          </div>
+          <div class="feature-item">
+            <div class="feature-icon">📦</div>
+            <div>
+              <h5>5 - 10 GB Ready</h5>
+              <p>Low-memory chunk streaming prevents iOS Safari crashes.</p>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="app-footer">
+        <p>AirBridge • Open Source P2P File Sharing • Ready for GitHub Pages</p>
+      </footer>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

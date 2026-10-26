@@ -1,0 +1,20 @@
+{
+  "name": "airbridge-server",
+  "version": "1.0.0",
+  "description": "Ultra-lightweight WebRTC WebSocket Signaling Server for AirBridge",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.9",
+    "@types/ws": "^8.5.10",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.2"
+  }
+}
