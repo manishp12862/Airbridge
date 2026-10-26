@@ -295,13 +295,28 @@ async function sendFile(file: File) {
 
   showProgressCard(file.name, file.size, false);
 
+  const dc: RTCDataChannel | undefined = activeConnection.dataChannel;
+  if (dc) {
+    dc.bufferedAmountLowThreshold = 256 * 1024; // 256 KB
+  }
+
   let offset = 0;
   const startTime = Date.now();
 
   while (offset < file.size) {
-    const dc = activeConnection.dataChannel;
-    if (dc && dc.bufferedAmount > 1024 * 1024) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    if (dc && dc.bufferedAmount > 512 * 1024) {
+      await new Promise<void>((resolve) => {
+        const onLow = () => {
+          dc.removeEventListener('bufferedamountlow', onLow);
+          resolve();
+        };
+        dc.addEventListener('bufferedamountlow', onLow);
+        // Safety timeout so it never hangs
+        setTimeout(() => {
+          dc.removeEventListener('bufferedamountlow', onLow);
+          resolve();
+        }, 50);
+      });
     }
 
     const chunkSlice = file.slice(offset, offset + CHUNK_SIZE);
