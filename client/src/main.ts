@@ -1,52 +1,86 @@
 import QRCode from 'qrcode';
+import {
+  DEFAULT_CHUNK_SIZE,
+  MAX_BUFFER_THRESHOLD,
+  BUFFER_LOW_THRESHOLD,
+  createFileHeader,
+  createDoneSignal,
+  isControlMessage,
+  parseIncomingChunk,
+  calculateProgress,
+  formatBytes,
+  shouldWaitBackpressure
+} from './transfer-core';
 
 declare const Peer: any;
 
+// -------------------------------------------------------------
+// CONSTANTS & CONFIGURATION
+// -------------------------------------------------------------
 const PEER_PREFIX = 'airbridge-v1-';
-const CHUNK_SIZE  = 16 * 1024;
 
-let myPin       = generateRandomPin();
-let peer: any   = null;
-let activeConn: any = null;
+// -------------------------------------------------------------
+// STATE
+// -------------------------------------------------------------
+let myPin = generateRandomPin();
+let peer: any = null;
+let activeConnection: any = null;
+let wakeLock: any = null;
 
 interface IncomingFile {
-  name: string; size: number; mimeType: string;
-  receivedBytes: number; chunks: ArrayBuffer[]; startTime: number;
+  name: string;
+  size: number;
+  type: string;
+  receivedBytes: number;
+  chunks: any[];
+  startTime: number;
 }
-let incomingFile: IncomingFile | null = null;
+let currentIncomingFile: IncomingFile | null = null;
 
-const pairingSection        = document.getElementById('pairingSection')!;
-const transferSection       = document.getElementById('transferSection')!;
-const myPinEl               = document.getElementById('myPin')!;
-const qrCanvas              = document.getElementById('qrCanvas') as HTMLCanvasElement;
-const joinForm              = document.getElementById('joinForm') as HTMLFormElement;
-const joinInput             = document.getElementById('joinInput') as HTMLInputElement;
-const connectionStatus      = document.getElementById('connectionStatus')!;
-const copyLinkBtn           = document.getElementById('copyLinkBtn')!;
-const disconnectBtn         = document.getElementById('disconnectBtn')!;
-const dropZone              = document.getElementById('dropZone')!;
-const fileInput             = document.getElementById('fileInput') as HTMLInputElement;
-const peerDeviceName        = document.getElementById('peerDeviceName')!;
-const statusPill            = document.getElementById('statusPill')!;
-const statusText            = document.getElementById('statusText')!;
-const transferProgressCard  = document.getElementById('transferProgressCard')!;
-const currentFileName       = document.getElementById('currentFileName')!;
-const transferPercentage    = document.getElementById('transferPercentage')!;
-const transferBytes         = document.getElementById('transferBytes')!;
-const transferSpeed         = document.getElementById('transferSpeed')!;
-const progressBar           = document.getElementById('progressBar')!;
-const transferDoneBox       = document.getElementById('transferDoneBox')!;
-const downloadBtn           = document.getElementById('downloadBtn') as HTMLAnchorElement;
-const fileList              = document.getElementById('fileList')!;
+// -------------------------------------------------------------
+// DOM ELEMENTS
+// -------------------------------------------------------------
+const pairingSection = document.getElementById('pairingSection')!;
+const transferSection = document.getElementById('transferSection')!;
+const myPinEl = document.getElementById('myPin')!;
+const qrCanvas = document.getElementById('qrCanvas') as HTMLCanvasElement;
+const joinForm = document.getElementById('joinForm') as HTMLFormElement;
+const joinInput = document.getElementById('joinInput') as HTMLInputElement;
+const connectionStatus = document.getElementById('connectionStatus')!;
+const copyLinkBtn = document.getElementById('copyLinkBtn')!;
+const disconnectBtn = document.getElementById('disconnectBtn')!;
+const dropZone = document.getElementById('dropZone')!;
+const fileInput = document.getElementById('fileInput') as HTMLInputElement;
 
+const peerDeviceName = document.getElementById('peerDeviceName')!;
+const statusPill = document.getElementById('statusPill');
+const statusText = document.getElementById('statusText');
+
+const transferProgressCard = document.getElementById('transferProgressCard')!;
+const currentFileName = document.getElementById('currentFileName')!;
+const transferPercentage = document.getElementById('transferPercentage')!;
+const transferBytes = document.getElementById('transferBytes')!;
+const transferSpeed = document.getElementById('transferSpeed')!;
+const progressBar = document.getElementById('progressBar')!;
+const transferDoneBox = document.getElementById('transferDoneBox')!;
+const downloadBtn = document.getElementById('downloadBtn') as HTMLAnchorElement;
+const fileList = document.getElementById('fileList')!;
+
+// -------------------------------------------------------------
+// INITIALIZATION
+// -------------------------------------------------------------
 function init() {
   const urlParams = new URLSearchParams(window.location.search);
   const roomParam = urlParams.get('room');
-  if (roomParam && roomParam.length === 4) joinInput.value = roomParam;
+  if (roomParam && roomParam.length === 4) {
+    joinInput.value = roomParam;
+  }
+
   myPinEl.textContent = myPin;
   generateQRCode();
   setupEventListeners();
   initPeer();
+  requestWakeLock();
 }
 
 function generateRandomPin(): string {
@@ -55,191 +89,432 @@ function generateRandomPin(): string {
 
 function generateQRCode() {
   const shareUrl = `${window.location.origin}${window.location.pathname}?room=${myPin}`;
-  QRCode.toCanvas(qrCanvas, shareUrl, { width: 196, margin: 0, color: { dark: '#090d16', light: '#ffffff' } });
+  QRCode.toCanvas(qrCanvas, shareUrl, {
+    width: 172,
+    margin: 0,
+    color: {
+      dark: '#090d16',
+      light: '#ffffff'
+    }
+  });
 }
 
+// -------------------------------------------------------------
+// SCREEN WAKE LOCK
+// -------------------------------------------------------------
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator) {
+      wakeLock = await (navigator as any).wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => {
+        wakeLock = null;
+      });
+    }
+  } catch (_) {
+    // Wake Lock not supported or battery saving active
+  }
+}
+
+// -------------------------------------------------------------
+// PEERJS CLOUD SIGNALING (Reliable WebRTC P2P)
+// -------------------------------------------------------------
 function initPeer() {
-  connectionStatus.textContent = 'Connecting to network...';
-  peer = new Peer(`${PEER_PREFIX}${myPin}`, {
-    debug: 0,
-    config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] }
+  connectionStatus.textContent = 'Connecting to signaling network...';
+
+  const fullId = `${PEER_PREFIX}${myPin}`;
+  peer = new Peer(fullId, {
+    debug: 1,
+    config: {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' }
+      ]
+    }
   });
 
   peer.on('open', () => {
-    statusPill.className = 'status-pill online';
-    statusText.textContent = 'Online';
     connectionStatus.textContent = 'Scan QR code or enter PIN on your other device';
-    const roomParam = new URLSearchParams(window.location.search).get('room');
-    if (roomParam && roomParam !== myPin) connectToPeer(roomParam);
+    if (statusPill) statusPill.className = 'status-pill online';
+    if (statusText) statusText.textContent = 'Online';
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const roomParam = urlParams.get('room');
+    if (roomParam && roomParam !== myPin) {
+      connectToPeer(roomParam);
+    }
   });
 
-  peer.on('connection', (conn: any) => setupConnection(conn));
+  peer.on('connection', (conn: any) => {
+    handleConnection(conn);
+  });
 
   peer.on('error', (err: any) => {
+    console.error('Peer error:', err);
     if (err.type === 'unavailable-id') {
-      myPin = generateRandomPin(); myPinEl.textContent = myPin; generateQRCode(); initPeer();
+      myPin = generateRandomPin();
+      myPinEl.textContent = myPin;
+      generateQRCode();
+      initPeer();
     } else if (err.type === 'peer-unavailable') {
-      connectionStatus.textContent = 'PIN not found. Check the code!';
+      connectionStatus.textContent = '❌ PIN not found or device is offline. Check the number!';
     } else {
-      connectionStatus.textContent = `Error: ${err.type}`;
+      connectionStatus.textContent = `Connection error: ${err.type}`;
     }
   });
 }
 
 function connectToPeer(targetPin: string) {
-  connectionStatus.textContent = `Connecting to ${targetPin}...`;
-  setupConnection(peer.connect(`${PEER_PREFIX}${targetPin}`, { reliable: true, serialization: 'none' }));
+  connectionStatus.textContent = `Connecting to device ${targetPin}...`;
+  const targetId = `${PEER_PREFIX}${targetPin}`;
+  const conn = peer.connect(targetId, {
+    reliable: true
+  });
+  handleConnection(conn);
 }
 
-function setupConnection(conn: any) {
-  activeConn = conn;
+function handleConnection(conn: any) {
+  activeConnection = conn;
+
   conn.on('open', () => {
-    if (conn.dataChannel) conn.dataChannel.binaryType = 'arraybuffer';
-    peerDeviceName.textContent = `Device (PIN ${conn.peer.replace(PEER_PREFIX, '')})`;
+    peerDeviceName.textContent = `Paired Device (${conn.peer.replace(PEER_PREFIX, 'PIN ')})`;
     showTransferView();
   });
-  conn.on('data', (data: any) => onData(data));
-  conn.on('close', () => resetToPairingView('Peer disconnected.'));
-  conn.on('error', () => resetToPairingView('Connection error.'));
+
+  conn.on('data', (data: any) => {
+    handleIncomingData(data);
+  });
+
+  conn.on('close', () => {
+    resetToPairingView('Connection closed by peer.');
+  });
+
+  conn.on('error', (err: any) => {
+    console.error('Connection error:', err);
+    resetToPairingView('Connection error occurred.');
+  });
 }
 
-function onData(data: any) {
-  if (typeof data === 'string') {
-    try {
-      const msg = JSON.parse(data);
-      if (msg.type === 'header') {
-        incomingFile = { name: msg.name, size: msg.size, mimeType: msg.mimeType || 'application/octet-stream', receivedBytes: 0, chunks: [], startTime: Date.now() };
-        showProgressCard(msg.name, msg.size, true);
-      } else if (msg.type === 'done' && incomingFile) {
-        finaliseReceive(incomingFile); incomingFile = null;
-      }
-    } catch (_) {}
+// -------------------------------------------------------------
+// FILE SENDER (Buffered Backpressure Streaming)
+// -------------------------------------------------------------
+async function sendFile(file: File) {
+  if (!activeConnection || !activeConnection.open) {
+    alert('Please wait for device connection!');
     return;
   }
-  if (data instanceof ArrayBuffer && incomingFile) {
-    incomingFile.chunks.push(data);
-    incomingFile.receivedBytes += data.byteLength;
-    updateProgress(incomingFile.receivedBytes, incomingFile.size, incomingFile.startTime);
-  }
-}
 
-async function sendFile(file: File) {
-  if (!activeConn || !activeConn.open) { alert('Not connected! Pair devices first.'); return; }
-  const dc: RTCDataChannel = activeConn.dataChannel;
-  activeConn.send(JSON.stringify({ type: 'header', name: file.name, size: file.size, mimeType: file.type || 'application/octet-stream' }));
+  activeConnection.send(createFileHeader(file.name, file.size, file.type));
   showProgressCard(file.name, file.size, false);
-  dc.bufferedAmountLowThreshold = 64 * 1024;
+
   let offset = 0;
   const startTime = Date.now();
-  while (offset < file.size) {
-    if (dc.bufferedAmount > 256 * 1024) {
-      await new Promise<void>((resolve) => {
-        const onDrain = () => { dc.removeEventListener('bufferedamountlow', onDrain); resolve(); };
-        dc.addEventListener('bufferedamountlow', onDrain);
-        setTimeout(() => { dc.removeEventListener('bufferedamountlow', onDrain); resolve(); }, 40);
-      });
-    }
-    const buf = await file.slice(offset, offset + CHUNK_SIZE).arrayBuffer();
-    try { dc.send(buf); } catch (_) { await new Promise<void>((r) => setTimeout(r, 30)); continue; }
-    offset += buf.byteLength;
-    updateProgress(offset, file.size, startTime);
+  const dc: RTCDataChannel | undefined = activeConnection.dataChannel;
+
+  if (dc) {
+    dc.bufferedAmountLowThreshold = BUFFER_LOW_THRESHOLD;
   }
-  setTimeout(() => { activeConn.send(JSON.stringify({ type: 'done' })); addHistoryItem(file.name, file.size, 'sent'); }, 200);
+
+  while (offset < file.size) {
+    // Strict backpressure wait loop: ensures buffer in flight NEVER exceeds MAX_BUFFER_THRESHOLD
+    if (dc) {
+      while (shouldWaitBackpressure(dc.bufferedAmount, MAX_BUFFER_THRESHOLD)) {
+        await new Promise<void>((resolve) => {
+          let resolved = false;
+          const onLow = () => {
+            if (!resolved) {
+              resolved = true;
+              dc.removeEventListener('bufferedamountlow', onLow);
+              resolve();
+            }
+          };
+          dc.addEventListener('bufferedamountlow', onLow);
+          setTimeout(onLow, 25);
+        });
+      }
+    }
+
+    const chunkSlice = file.slice(offset, offset + DEFAULT_CHUNK_SIZE);
+    const buffer = await chunkSlice.arrayBuffer();
+
+    activeConnection.send(buffer);
+
+    offset += buffer.byteLength;
+    updateTransferProgress(offset, file.size, startTime);
+  }
+
+  setTimeout(() => {
+    if (activeConnection && activeConnection.open) {
+      activeConnection.send(createDoneSignal());
+      addHistoryItem(file.name, file.size, 'sent');
+    }
+  }, 100);
 }
 
-function finaliseReceive(file: IncomingFile) {
-  const blob = new Blob(file.chunks, { type: file.mimeType });
-  const url  = URL.createObjectURL(blob);
+// -------------------------------------------------------------
+// FILE RECEIVER
+// -------------------------------------------------------------
+async function handleIncomingData(data: any) {
+  if (isControlMessage(data)) {
+    if (data.type === 'header') {
+      currentIncomingFile = {
+        name: data.name,
+        size: data.size,
+        type: data.mimeType || 'application/octet-stream',
+        receivedBytes: 0,
+        chunks: [],
+        startTime: Date.now()
+      };
+      showProgressCard(data.name, data.size, true);
+    } else if (data.type === 'done') {
+      if (currentIncomingFile) {
+        completeIncomingFile(currentIncomingFile);
+        currentIncomingFile = null;
+      }
+    }
+    return;
+  }
+
+  if (currentIncomingFile) {
+    let chunk = parseIncomingChunk(data);
+    if (!chunk && typeof Blob !== 'undefined' && data instanceof Blob) {
+      const arr = await data.arrayBuffer();
+      chunk = new Uint8Array(arr);
+    }
+
+    if (chunk) {
+      currentIncomingFile.chunks.push(chunk);
+      currentIncomingFile.receivedBytes += chunk.byteLength;
+      updateTransferProgress(
+        currentIncomingFile.receivedBytes,
+        currentIncomingFile.size,
+        currentIncomingFile.startTime
+      );
+    }
+  }
+}
+
+function completeIncomingFile(file: IncomingFile) {
+  const blob = new Blob(file.chunks as BlobPart[], { type: file.type || 'application/octet-stream' });
+  const objectUrl = URL.createObjectURL(blob);
+
   transferDoneBox.classList.remove('hidden');
-  downloadBtn.href = url; downloadBtn.download = file.name;
+  downloadBtn.href = objectUrl;
+  downloadBtn.download = file.name;
+
+  // Auto trigger download for mobile Safari & Android Chrome
   const a = document.createElement('a');
-  a.href = url; a.download = file.name; document.body.appendChild(a);
-  setTimeout(() => { a.click(); document.body.removeChild(a); }, 100);
-  addHistoryItem(file.name, file.size, 'received', url);
+  a.href = objectUrl;
+  a.download = file.name;
+  document.body.appendChild(a);
+  setTimeout(() => {
+    a.click();
+    document.body.removeChild(a);
+  }, 100);
+
+  addHistoryItem(file.name, file.size, 'received', objectUrl);
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024, units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${(bytes / Math.pow(k, i)).toFixed(2)} ${units[i]}`;
+// -------------------------------------------------------------
+// UI HELPERS
+// -------------------------------------------------------------
+function updateTransferProgress(loaded: number, total: number, startTime: number) {
+  const p = calculateProgress(loaded, total, startTime);
+  progressBar.style.width = `${p.percent}%`;
+  transferPercentage.textContent = `${p.percent}%`;
+  transferBytes.textContent = `${p.formattedLoaded} / ${p.formattedTotal}`;
+  transferSpeed.textContent = p.speedMBs;
 }
 
-function updateProgress(loaded: number, total: number, startTime: number) {
-  const pct = Math.min(100, Math.round((loaded / total) * 100));
-  const elapsed = (Date.now() - startTime) / 1000;
-  const speed = elapsed > 0 ? loaded / elapsed : 0;
-  progressBar.style.width = `${pct}%`;
-  transferPercentage.textContent = `${pct}%`;
-  transferBytes.textContent = `${formatBytes(loaded)} / ${formatBytes(total)}`;
-  transferSpeed.textContent = `${(speed / 1048576).toFixed(1)} MB/s`;
-}
-
-function showProgressCard(name: string, _size: number, receiving: boolean) {
+function showProgressCard(name: string, _size: number, isReceiving: boolean) {
   transferProgressCard.classList.remove('hidden');
   transferDoneBox.classList.add('hidden');
-  currentFileName.textContent = `${receiving ? 'Receiving' : 'Sending'}: ${name}`;
-  progressBar.style.width = '0%'; transferPercentage.textContent = '0%';
-  transferBytes.textContent = ''; transferSpeed.textContent = '';
+  currentFileName.textContent = `${isReceiving ? 'Receiving: ' : 'Sending: '} ${name}`;
+  progressBar.style.width = '0%';
+  transferPercentage.textContent = '0%';
+  transferBytes.textContent = '';
+  transferSpeed.textContent = '';
 }
 
-function showTransferView() { pairingSection.classList.add('hidden'); transferSection.classList.remove('hidden'); }
+function showTransferView() {
+  pairingSection.classList.add('hidden');
+  transferSection.classList.remove('hidden');
+}
+
 function resetToPairingView(reason?: string) {
-  pairingSection.classList.remove('hidden'); transferSection.classList.add('hidden');
-  activeConn = null; if (reason) connectionStatus.textContent = reason;
+  pairingSection.classList.remove('hidden');
+  transferSection.classList.add('hidden');
+  if (reason) connectionStatus.textContent = reason;
 }
 
-function addHistoryItem(name: string, size: number, mode: 'sent' | 'received', url?: string) {
-  fileList.querySelectorAll('.empty-list').forEach(e => e.remove());
+function addHistoryItem(name: string, size: number, mode: 'sent' | 'received', downloadUrl?: string) {
+  const empty = fileList.querySelector('.empty-list');
+  if (empty) empty.remove();
+
   const item = document.createElement('div');
   item.className = 'history-item';
-  item.innerHTML = `<span>${mode === 'sent' ? '↑' : '↓'} <strong>${name}</strong> <small>(${formatBytes(size)})</small></span>${url ? `<a href="${url}" download="${name}" class="btn-save" style="font-size:0.78rem;padding:0.3rem 0.7rem">Save</a>` : ''}`;
+  item.innerHTML = `
+    <span>${mode === 'sent' ? '↑' : '↓'} <strong>${name}</strong> <small style="color: var(--text-dim); margin-left: 0.4rem">(${formatBytes(size)})</small></span>
+    ${downloadUrl ? `<a href="${downloadUrl}" download="${name}" class="btn-save" style="font-size: 0.78rem; padding: 0.3rem 0.7rem;">Save</a>` : ''}
+  `;
   fileList.prepend(item);
 }
 
+// -------------------------------------------------------------
+// EVENT LISTENERS
+// -------------------------------------------------------------
 function setupEventListeners() {
-  joinForm.addEventListener('submit', (e) => { e.preventDefault(); const pin = joinInput.value.trim(); if (pin.length === 4) connectToPeer(pin); });
-  copyLinkBtn.addEventListener('click', async () => {
-    await navigator.clipboard.writeText(`${window.location.origin}${window.location.pathname}?room=${myPin}`);
-    copyLinkBtn.textContent = 'Copied!';
-    setTimeout(() => { copyLinkBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg><span>Copy Link</span>`; }, 2000);
+  joinForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const pin = joinInput.value.trim();
+    if (pin.length === 4) {
+      connectToPeer(pin);
+    }
   });
-  disconnectBtn?.addEventListener('click', () => { activeConn?.close(); resetToPairingView('Disconnected.'); });
-  dropZone.addEventListener('click', (e) => { if (e.target !== fileInput) fileInput.click(); });
-  dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
-  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-  dropZone.addEventListener('drop', (e) => { e.preventDefault(); dropZone.classList.remove('dragover'); Array.from(e.dataTransfer?.files ?? []).forEach(f => sendFile(f)); });
-  fileInput.addEventListener('change', () => { Array.from(fileInput.files ?? []).forEach(f => sendFile(f)); fileInput.value = ''; });
+
+  copyLinkBtn.addEventListener('click', async () => {
+    const shareUrl = `${window.location.origin}${window.location.pathname}?room=${myPin}`;
+    await navigator.clipboard.writeText(shareUrl);
+    copyLinkBtn.textContent = 'Copied!';
+    setTimeout(() => {
+      copyLinkBtn.innerHTML = `
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+        </svg>
+        <span>Copy Link</span>
+      `;
+    }, 2000);
+  });
+
+  disconnectBtn?.addEventListener('click', () => {
+    activeConnection?.close();
+    resetToPairingView('Disconnected.');
+  });
+
+  dropZone.addEventListener('click', (e) => {
+    if (e.target !== fileInput) {
+      fileInput.click();
+    }
+  });
+
+  dropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropZone.classList.add('dragover');
+  });
+
+  dropZone.addEventListener('dragleave', () => {
+    dropZone.classList.remove('dragover');
+  });
+
+  dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    if (e.dataTransfer?.files.length) {
+      Array.from(e.dataTransfer.files).forEach((file) => sendFile(file));
+    }
+  });
+
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files?.length) {
+      Array.from(fileInput.files).forEach((file) => sendFile(file));
+      fileInput.value = '';
+    }
+  });
 }
 
+// -------------------------------------------------------------
+// 3D NEON PARTICLE & CONSTELLATION BACKGROUND
+// -------------------------------------------------------------
 function initBackgroundParticles() {
   const canvas = document.getElementById('bgParticles') as HTMLCanvasElement;
   if (!canvas) return;
-  const ctx = canvas.getContext('2d'); if (!ctx) return;
-  let W = (canvas.width = window.innerWidth), H = (canvas.height = window.innerHeight);
-  window.addEventListener('resize', () => { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; });
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  let width = (canvas.width = window.innerWidth);
+  let height = (canvas.height = window.innerHeight);
+
+  window.addEventListener('resize', () => {
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
+  });
+
+  const particleCount = Math.min(width < 600 ? 35 : 65, 80);
+  const particles: Array<{
+    x: number;
+    y: number;
+    vx: number;
+    vy: number;
+    size: number;
+    color: string;
+    alpha: number;
+  }> = [];
+
   const colors = ['#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899'];
-  const pts = Array.from({ length: Math.min(W < 600 ? 35 : 60, 80) }, () => ({
-    x: Math.random() * W, y: Math.random() * H,
-    vx: (Math.random() - 0.5) * 0.65, vy: (Math.random() - 0.5) * 0.65,
-    r: Math.random() * 2.2 + 0.8, color: colors[Math.floor(Math.random() * colors.length)], a: Math.random() * 0.55 + 0.2
-  }));
-  (function loop() {
-    ctx.clearRect(0, 0, W, H);
-    for (let i = 0; i < pts.length; i++) {
-      const p = pts[i]; p.x += p.vx; p.y += p.vy;
-      if (p.x < 0) p.x = W; else if (p.x > W) p.x = 0;
-      if (p.y < 0) p.y = H; else if (p.y > H) p.y = 0;
-      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-      ctx.fillStyle = p.color; ctx.globalAlpha = p.a; ctx.shadowBlur = 10; ctx.shadowColor = p.color; ctx.fill();
-      for (let j = i + 1; j < pts.length; j++) {
-        const q = pts[j], dx = p.x - q.x, dy = p.y - q.y, d = Math.sqrt(dx * dx + dy * dy);
-        if (d < 115) { ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.strokeStyle = p.color; ctx.lineWidth = 0.75; ctx.globalAlpha = (1 - d / 115) * 0.2; ctx.stroke(); }
+
+  for (let i = 0; i < particleCount; i++) {
+    particles.push({
+      x: Math.random() * width,
+      y: Math.random() * height,
+      vx: (Math.random() - 0.5) * 0.7,
+      vy: (Math.random() - 0.5) * 0.7,
+      size: Math.random() * 2.5 + 1,
+      color: colors[Math.floor(Math.random() * colors.length)],
+      alpha: Math.random() * 0.6 + 0.2
+    });
+  }
+
+  function animate() {
+    if (!ctx) return;
+    ctx.clearRect(0, 0, width, height);
+
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+
+      if (p.x < 0) p.x = width;
+      if (p.x > width) p.x = 0;
+      if (p.y < 0) p.y = height;
+      if (p.y > height) p.y = 0;
+
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fillStyle = p.color;
+      ctx.globalAlpha = p.alpha;
+      ctx.shadowBlur = 10;
+      ctx.shadowColor = p.color;
+      ctx.fill();
+
+      for (let j = i + 1; j < particles.length; j++) {
+        const p2 = particles[j];
+        const dx = p.x - p2.x;
+        const dy = p.y - p2.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist < 120) {
+          ctx.beginPath();
+          ctx.moveTo(p.x, p.y);
+          ctx.lineTo(p2.x, p2.y);
+          ctx.strokeStyle = p.color;
+          ctx.globalAlpha = (1 - dist / 120) * 0.22;
+          ctx.lineWidth = 0.8;
+          ctx.stroke();
+        }
       }
     }
-    ctx.globalAlpha = 1; ctx.shadowBlur = 0; requestAnimationFrame(loop);
-  })();
+
+    ctx.globalAlpha = 1.0;
+    ctx.shadowBlur = 0;
+    requestAnimationFrame(animate);
+  }
+
+  animate();
 }
 
+// Start app
 init();
 initBackgroundParticles();

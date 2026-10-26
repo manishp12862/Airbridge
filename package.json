@@ -8,7 +8,8 @@
     "dev:client": "npm --prefix client run dev",
     "dev:server": "npm --prefix server run dev",
     "build": "npm --prefix client run build && npm --prefix server run build",
-    "install:all": "npm install && npm --prefix client install && npm --prefix server install"
+    "install:all": "npm install && npm --prefix client install && npm --prefix server install",
+    "test": "./server/node_modules/.bin/tsx --test tests/transfer.test.mjs"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"
