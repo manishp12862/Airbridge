@@ -480,6 +480,13 @@ function setupEventListeners() {
     resetToPairingView('Disconnected.');
   });
 
+  dropZone.addEventListener('click', (e) => {
+    // Only trigger if not clicking directly on fileInput itself to avoid loop
+    if (e.target !== fileInput) {
+      fileInput.click();
+    }
+  });
+
   dropZone.addEventListener('dragover', (e) => {
     e.preventDefault();
     dropZone.classList.add('dragover');
@@ -500,6 +507,7 @@ function setupEventListeners() {
   fileInput.addEventListener('change', () => {
     if (fileInput.files?.length) {
       Array.from(fileInput.files).forEach((file) => sendFile(file));
+      fileInput.value = ''; // Reset input so user can re-select the same file
     }
   });
 }
