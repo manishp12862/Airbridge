@@ -154,7 +154,8 @@ function connectToPeer(targetPin: string) {
   connectionStatus.textContent = `Connecting to device ${targetPin}...`;
   const targetId = `${PEER_PREFIX}${targetPin}`;
   const conn = peer.connect(targetId, {
-    reliable: true
+    reliable: true,
+    serialization: "binary"
   });
   handleConnection(conn);
 }
@@ -224,8 +225,9 @@ async function sendFile(file: File) {
 // -------------------------------------------------------------
 // FILE RECEIVER
 // -------------------------------------------------------------
-function handleIncomingData(data: any) {
-  if (data && typeof data === 'object' && !(data instanceof ArrayBuffer)) {
+async function handleIncomingData(data: any) {
+  // Check if JSON message (header or done)
+  if (data && typeof data === 'object' && !(data instanceof ArrayBuffer) && !(data instanceof Blob) && !(data.buffer instanceof ArrayBuffer)) {
     if (data.type === 'header') {
       currentIncomingFile = {
         name: data.name,
@@ -245,9 +247,22 @@ function handleIncomingData(data: any) {
     return;
   }
 
-  if (currentIncomingFile && data instanceof ArrayBuffer) {
-    currentIncomingFile.chunks.push(data);
-    currentIncomingFile.receivedBytes += data.byteLength;
+  // Handle binary data: ArrayBuffer, Uint8Array, or Blob
+  if (currentIncomingFile) {
+    let buffer: ArrayBuffer;
+    if (data instanceof Blob) {
+      buffer = await data.arrayBuffer();
+    } else if (data instanceof ArrayBuffer) {
+      buffer = data;
+    } else if (data && data.buffer instanceof ArrayBuffer) {
+      buffer = data.buffer;
+    } else {
+      console.warn('Unknown binary chunk format:', data);
+      return;
+    }
+
+    currentIncomingFile.chunks.push(buffer);
+    currentIncomingFile.receivedBytes += buffer.byteLength;
 
     updateProgress(
       currentIncomingFile.receivedBytes,
@@ -258,16 +273,21 @@ function handleIncomingData(data: any) {
 }
 
 function completeIncomingFile(file: IncomingFile) {
-  const blob = new Blob(file.chunks, { type: file.type });
+  console.log("[AirBridge] Received chunks count:", file.chunks.length, "totalBytes:", file.receivedBytes);
+  const blob = new Blob(file.chunks, { type: file.type || "application/octet-stream" });
   const objectUrl = URL.createObjectURL(blob);
 
-  transferDoneBox.classList.remove('hidden');
+  transferDoneBox.classList.remove("hidden");
   downloadBtn.href = objectUrl;
   downloadBtn.download = file.name;
 
-  downloadBtn.click();
+  // Append download link to body for iOS Safari & Chrome compatibility
+  document.body.appendChild(downloadBtn);
+  setTimeout(() => {
+    downloadBtn.click();
+  }, 100);
 
-  addHistoryItem(file.name, file.size, 'received', objectUrl);
+  addHistoryItem(file.name, file.size, "received", objectUrl);
 }
 
 // -------------------------------------------------------------
